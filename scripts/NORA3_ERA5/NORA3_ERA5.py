@@ -10,6 +10,7 @@ NOTE: expver is not treated, and files containing the expver dimension cannot be
 import netCDF4 as nc4
 import numpy as np
 import os
+import sys
 import argparse
 import xarray as xr
 import cartopy.crs as ccrs
@@ -200,6 +201,64 @@ def get_era5_timeseries(param, lon, lat, start_time, end_time, use_atm=True):
     # return time series as xarray
     return era5_da
 
+nora3_data_variables = ["air_temperature_0m",
+    "surface_geopotential",
+    "liquid_water_content_of_surface_snow",
+    "downward_northward_momentum_flux_in_air",
+    "downward_eastward_momentum_flux_in_air",
+    "integral_of_toa_net_downward_shortwave_flux_wrt_time",
+    "integral_of_surface_net_downward_shortwave_flux_wrt_time",
+    "integral_of_toa_outgoing_longwave_flux_wrt_time",
+    "integral_of_surface_net_downward_longwave_flux_wrt_time",
+    "integral_of_surface_downward_latent_heat_evaporation_flux_wrt_time",
+    "integral_of_surface_downward_latent_heat_sublimation_flux_wrt_time",
+    "water_evaporation_amount",
+    "surface_snow_sublimation_amount_acc",
+    "integral_of_surface_downward_sensible_heat_flux_wrt_time",
+    "integral_of_surface_downwelling_shortwave_flux_in_air_wrt_time",
+    "integral_of_surface_downwelling_longwave_flux_in_air_wrt_time",
+    "rainfall_amount",
+    "snowfall_amount",
+    "graupelfall_amount_acc",
+    "air_temperature_2m",
+    "relative_humidity_2m",
+    "specific_humidity_2m",
+    "x_wind_10m",
+    "y_wind_10m",
+    "cloud_area_fraction",
+    "x_wind_gust_10m",
+    "y_wind_gust_10m",
+    "air_temperature_max",
+    "air_temperature_min",
+    "convective_cloud_area_fraction",
+    "high_type_cloud_area_fraction",
+    "medium_type_cloud_area_fraction",
+    "low_type_cloud_area_fraction",
+    "atmosphere_boundary_layer_thickness",
+    "hail_diagnostic",
+    "graupelfall_amount",
+    "x_wind_pl",
+    "y_wind_pl",
+    "air_temperature_pl",
+    "cloud_area_fraction_pl",
+    "geopotential_pl",
+    "relative_humidity_pl",
+    "upward_air_velocity_pl",
+    "air_pressure_at_sea_level",
+    "lwe_thickness_of_atmosphere_mass_content_of_water_vapor",
+    "x_wind_z",
+    "y_wind_z",
+    "surface_air_pressure",
+    "lifting_condensation_level",
+    "atmosphere_level_of_free_convection",
+    "atmosphere_level_of_neutral_buoyancy",
+    "wind_direction",
+    "wind_speed",
+    "precipitation_amount_acc",
+    "snowfall_amount_acc"
+]
+
+@profile
 def get_nora3_timeseries(param, lon, lat, start_time, end_time):
     """Time series extraction from NORA3.
 
@@ -320,14 +379,18 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
     # correction for not being able to read files with open_mfdataset
     # some leap year oddity??
     # XXX: extremely hacky workaround
-    filenames = [x for x in filenames if not x.startswith("/lustre/storeB/project/fou/om/WINDSURFER/HM40h12/netcdf/2020/02/29/18/fc2020022918")]
-    spinup_filenames = [x for x in spinup_filenames if not x.startswith("/lustre/storeB/project/fou/om/WINDSURFER/HM40h12/netcdf/2020/02/29/18/fc2020022918")]
+    if param in integrated_params:
+        filenames = [x for x in filenames if not x.startswith("/lustre/storeB/project/fou/om/WINDSURFER/HM40h12/netcdf/2020/02/29/18/fc2020022918")]
+        spinup_filenames = [x for x in spinup_filenames if not x.startswith("/lustre/storeB/project/fou/om/WINDSURFER/HM40h12/netcdf/2020/02/29/18/fc2020022918")]
 
     #print(spinup_filenames)
     #print(filenames)
 
     with dask.config.set(**{'array.slicing.split_large_chunks': True}):
-        nora3 = xr.open_mfdataset(filenames)
+        drop_variables = nora3_data_variables.copy()
+        drop_variables.remove(param) # do not remove the parameter we are interested in
+        nora3 = xr.open_mfdataset(filenames, parallel=True, concat_dim="time", combine="nested",
+                  data_vars='minimal', coords='minimal', compat='override', drop_variables=drop_variables)
 
         # find coordinates in data set projection by transformation:
         #data_crs = ccrs.LambertConformal(central_longitude=-42.0, central_latitude=66.3,
@@ -364,7 +427,8 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
             nora3_da_first_timestep = nora3_first_timestep[param].isel(x=x_idx, y=y_idx)
             nora3_da_first_timestep = nora3_da_first_timestep.sel(time=slice(start_time-hour))
 
-            nora3_spinup = xr.open_mfdataset(spinup_filenames)
+            nora3_spinup = xr.open_mfdataset(spinup_filenames, parallel=True, concat_dim="time", combine="nested",
+                  data_vars='minimal', coords='minimal', compat='override', drop_variables=drop_variables)
             nora3_da_spinup = nora3_spinup[param].isel(x=x_idx, y=y_idx)
             nora3_da_spinup = nora3_da_spinup.sel(time=slice(start_time, end_time-hour))
 
@@ -568,6 +632,13 @@ def init_netcdf_output_file(out_da, station_ids, station_lons, station_lats):
 
     # ensure CF compliance
     out_da.attrs["Conventions"] = "CF-1.8"
+    out_da.attrs["reference"] = "https://thredds.met.no/thredds/projects/nora3.html"
+    out_da.attrs["summary"] = "Timeseries extracted from NORA3 3-km Norwegian Reanalysis"
+    out_da.attrs["project"] = "NORA3 and SUNPOINT"
+    out_da.attrs["institute"] = "Norwegian Meteorological Institute"
+    out_da.attrs["creator_url"] = "https://www.met.no"
+    out_da.attrs["contact"] = "martinls@met.no"
+
     out_da["longitude"].attrs["units"] = "degrees_east"
     out_da["longitude"].attrs["long_name"] = "longitude"
     out_da["longitude"].attrs["description"] = "longitude of closest data point to station"
@@ -582,9 +653,9 @@ def init_netcdf_output_file(out_da, station_ids, station_lons, station_lats):
     out_da["latitude_station"].attrs["units"] = "degrees_north"
     out_da["latitude_station"].attrs["long_name"] = "latitude_station"
 
-def write_timeseries_MO(stations_file, output_file, param, start_time, end_time):
+def write_MO_timeseries(stations_file, output_file, param, start_time, end_time):
     """WiP: Get stations (w/locations), do time series extraction from ERA5/NORA3, and write results to netCDF file."""
-    # write msl timeseries for the complete ERA5 period for
+    # write timeseries for the complete ERA5 period for
     # every observation in obs data file (see line below)
     stations = xr.open_mfdataset(stations_file)
 
@@ -641,54 +712,96 @@ def write_timeseries_MO(stations_file, output_file, param, start_time, end_time)
 
             append_to_netcdf(output_file, out_da, unlimited_dims="time")
 
+import csv
+def read_stations(stationlist):
+    with open(stationlist, encoding='utf-8') as csv_file:
+        input_stations = {
+            "stationid": [],
+            "longitude": [],
+            "latitude": []
+        }
+        csv_reader = csv.reader(csv_file, delimiter=',')
+        next(csv_reader)
+        for row in csv_reader:
+            input_stations["stationid"].append(row[1])
+            input_stations["longitude"].append(float(row[3]))
+            input_stations["latitude"].append(float(row[2]))
+        
+        #print("{} has lonlat coordinates ({}, {})".format(row[1], row[3], row[2]))
+
+    return input_stations
+
 if __name__ == "__main__":
     # TODO: fix memory prob with to_netcdf() in order to write long timeseries w/o appending,
     #       find nearest "wet point" and describe difference in latlon for these stations, 
     #       extract functions (choose time stride, parameter, input and output filenames)
 
     # parse optional arguments
-    #parser = argparse.ArgumentParser(description="Extract timeseries from NORA3/ERA5 \
-    #    data sets based on location and time interval fetched from netCDF-files containing \
-    #    stations, and write to netCDF.")
-    #parser.add_argument('-i','--input-stations', metavar='FILENAME', \
-    #    help='input file name containing stations (netCDF format)',required=False)
-    #parser.add_argument('-o','--output-file', metavar='FILENAME', \
-    #    help='output file',required=False)
-    #parser.add_argument('-p','--parameter', metavar='PARAMETER', \
-    #    help='parameter name (netCDF name)',required=False)
-    #parser.add_argument('-s','--start-time', metavar='YYYY-MM-DDTHH:MM', \
-    #    help='input file name containing stations (netCDF format)',required=False)
-    #parser.add_argument('-e','--end-time', metavar='YYYY-MM-DDTHH:MM', \
-    #    help='input file name containing stations (netCDF format)',required=False)
+    parser = argparse.ArgumentParser(description="Extract timeseries from NORA3/ERA5 \
+        data sets based on location and time interval fetched from netCDF-files containing \
+        stations, and write to netCDF.")
+    parser.add_argument('-i','--input-stations', metavar='FILENAME', \
+        help='input file name containing stations (netCDF or CVS format)',required=False)
+    parser.add_argument('-o','--output-file', metavar='FILENAME', \
+        help='output file',required=False)
+    parser.add_argument('-p','--parameter', metavar='PARAMETER', \
+        help='parameter name (netCDF name)',required=False)
+    parser.add_argument('-s','--start-time', metavar='YYYY-MM-DDTHH:MM', \
+        help='input file name containing stations (netCDF format)',required=False)
+    parser.add_argument('-e','--end-time', metavar='YYYY-MM-DDTHH:MM', \
+        help='input file name containing stations (netCDF format)',required=False)
 
-    #args = parser.parse_args()
+    args = parser.parse_args()
 
-    #if not len(sys.argv) > 1:
-    #    print("Provide arguments. See NORA3_ERA5.py --help")
+    if not len(sys.argv) > 1:
+        print("Provide arguments. See NORA3_ERA5.py --help")
 
-    #start_time = datetime.strptime(args.start_time, '%Y-%m-%dT%H:%M.%f')
-    #end_time = datetime.strptime(args.end_time, '%Y-%m-%dT%H:%M.%f')
-    #write_timeseries(args.input_stations, args.output_file, args.param, start_time, end_time)
+    start_time = datetime.strptime(args.start_time, '%Y-%m-%dT%H:%M')
+    end_time = datetime.strptime(args.end_time, '%Y-%m-%dT%H:%M')
 
     # hardcoded example - extracting param from start_time to end_time for all stations contained in the input_stations nedCDF file
+    #start_time = datetime(2020, 1, 1, 0)
+    #end_time = datetime(2020, 12, 31, 23)
+    #
     #input_stations = "/lustre/storeB/project/IT/geout/machine-ocean/prepared_datasets/storm_surge/aggregated_water_level_data/aggregated_water_level_observations_with_pytide_prediction_dataset.nc4"
     #output_file = "aggregated_era5_mwd.nc"
     #param = "mwd"
     #start_time = datetime(2020, 1, 1, 0)
     #end_time = datetime(2021, 4, 30, 23)
-    #write_timeseries(input_stations, output_file, param, start_time, end_time)
+    #write_MO_timeseries(input_stations, output_file, param, start_time, end_time)
 
     # hardcoded example - extracting param from start_time to end_time for all stations contained in the input_stations dict
     input_stations = {
-        "stationid": ["Blindern", "Bergen", "Tromsø-Holt"],
-        "longitude": [10.72, 5.332, 18.9368],
-        "latitude": [59.9423, 60.3837, 69.6537]
+        "stationid": ["Oslo-Blindern"],
+        "longitude": [10.72],
+        "latitude": [59.9423]
     }
+    # stasjoner med skyobservasjoner
+    #input_stations = {
+    #    "stationid": ["Oslo-Blindern", "Rygge", "Bergen-Florida", "Flesland", "Dovre-Lannem", "Tromsø-Holt", "Karasjok"],
+    #    "longitude": [10.72, 10.7543001174927, 5.332, 5.22650003433228, 9.21430015563965, 18.9368, 25.5023002624512],
+    #    "latitude": [59.9423, 59.3979988098145, 60.3837, 60.2891998291016, 62.0172004699707, 69.6537, 69.4635009765625]
+    #}
+    # andre stasjoner som skal hentes ut
+    #input_stations = {
+    #    "stationid": ["Ås", "Finse", "Juvvasshøe", "Trondheim-Gløshaugen", "Iskoras"],
+    #    "longitude": [10.7818002700806, 7.5241, 8.36900043487549, 10.4071998596191, 25.3460006713867],
+    #    "latitude": [59.6604995727539, 60.5932, 61.6775016784668, 63.4152984619141, 69.3003005981445]
+    #}
 
-    output_file = "integral_of_surface_downwelling_shortwave_flux_in_air_wrt_time_2020.nc"
-    param = "integral_of_surface_downwelling_shortwave_flux_in_air_wrt_time"
-    start_time = datetime(2020, 1, 1, 0)
-    end_time = datetime(2020, 12, 31, 23)
-    write_SUNPOINT_timeseries(input_stations, output_file, param, start_time, end_time)
+    #output_file = "integral_of_surface_downwelling_shortwave_flux_in_air_wrt_time_2020.nc"
 
+    #param = "integral_of_surface_downwelling_shortwave_flux_in_air_wrt_time"
+    #param = "cloud_area_fraction"
+
+    #write_timeseries(args.input_stations, args.output_file, args.parameter, start_time, end_time)
+
+    #input_stations = {
+    #    "stationid": ["Ås", "Finse", "Juvvasshøe", "Trondheim-Gløshaugen", "Iskoras"],
+    #    "longitude": [10.7818002700806, 7.5241, 8.36900043487549, 10.4071998596191, 25.3460006713867],
+    #    "latitude": [59.6604995727539, 60.5932, 61.6775016784668, 63.4152984619141, 69.3003005981445]
+    #}
+    
+    #input_stations = read_stations(args.input_stations)
+    write_SUNPOINT_timeseries(input_stations, args.output_file, args.parameter, start_time, end_time)
 # %%
