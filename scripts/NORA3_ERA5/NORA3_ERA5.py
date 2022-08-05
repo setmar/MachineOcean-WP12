@@ -258,7 +258,7 @@ nora3_data_variables = ["air_temperature_0m",
     "snowfall_amount_acc"
 ]
 
-@profile
+#@profile
 def get_nora3_timeseries(param, lon, lat, start_time, end_time):
     """Time series extraction from NORA3.
 
@@ -289,12 +289,15 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
         "snowfall_amount_acc", 
         "precipitation_amount_acc"]
 
+    lon = lon if isinstance(lon, list) else [lon]
+    lat = lat if isinstance(lat, list) else [lat]
+
     # sanity check arguments
     if param not in available_atm_params:
         raise RuntimeError("Undefined parameter: " + param)
-    if 44.0 > lat > 83.0:
+    if any(x < 44.0 for x in lat) and any(x > 83.0 for x in lat):
         raise RuntimeError("Latitude (lat) must be in the interval [44.0, 83.0]")
-    if -30.0 > lon > 85.0:
+    if any(x < -30.0 for x in lon) and any(x > 85.0 for x in lon):
         raise RuntimeError("Longitude (lon) must be in the interval [-30.0, 85.0]")
     
     #print("From " + start_time.strftime("%Y%m%d-%H"))
@@ -404,10 +407,15 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
         #print("Projected lon, lat: " + str(nora3_da_lon.values) + ", " + str(nora3_da_lat.values))
         
         # find coordinates in data set projection by lookup in lon-lat variables
-        abslat = np.abs(nora3.latitude-lat)
-        abslon = np.abs(nora3.longitude-lon)
-        cor = np.maximum(abslon, abslat)
-        ([y_idx], [x_idx]) = np.where(cor == np.min(cor))
+        y_idx = []
+        x_idx = []
+        for (lon_elem, lat_elem) in zip(lon, lat):
+            abslat = np.abs(nora3.latitude-lat_elem)
+            abslon = np.abs(nora3.longitude-lon_elem)
+            cor = np.maximum(abslon, abslat)
+            y_idx.append(np.where(cor == np.min(cor))[0][0])
+            x_idx.append(np.where(cor == np.min(cor))[1][0])
+            #([y_idx], [x_idx]) = np.where(cor == np.min(cor))
 
         #print("Projected lon, lat: " 
         #        + str(nora3["longitude"].isel(x=x_idx, y=y_idx).values) + ", " 
@@ -415,8 +423,11 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
 
         # extract data set
         #nora3_da = nora3[param].sel(x=x, y=y, method="nearest")
-        nora3_da = nora3[param].isel(x=x_idx, y=y_idx)
+        #nora3[param] = nora3[param].expand_dims({"station": len(lon)})
+        nora3_da = nora3[param].isel(x=xr.DataArray(x_idx, dims="station"), y=xr.DataArray(y_idx, dims="station"))
         nora3_da = nora3_da.sel(time=slice(start_time, end_time))
+        if param == "cloud_area_fraction":
+            nora3_da = nora3_da.isel(height3=[0])
 
         del nora3_da["x"]
         del nora3_da["y"]
@@ -424,13 +435,15 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
 
         if param in integrated_params:
             nora3_first_timestep = xr.open_dataset(first_timestep_filename)
-            nora3_da_first_timestep = nora3_first_timestep[param].isel(x=x_idx, y=y_idx)
+            nora3_da_first_timestep = nora3_first_timestep[param].isel(x=xr.DataArray(x_idx, dims="station"), y=xr.DataArray(y_idx, dims="station"))
             nora3_da_first_timestep = nora3_da_first_timestep.sel(time=slice(start_time-hour))
 
             nora3_spinup = xr.open_mfdataset(spinup_filenames, parallel=True, concat_dim="time", combine="nested",
                   data_vars='minimal', coords='minimal', compat='override', drop_variables=drop_variables)
-            nora3_da_spinup = nora3_spinup[param].isel(x=x_idx, y=y_idx)
+            nora3_da_spinup = nora3_spinup[param].isel(x=xr.DataArray(x_idx, dims="station"), y=xr.DataArray(y_idx, dims="station"))
             nora3_da_spinup = nora3_da_spinup.sel(time=slice(start_time, end_time-hour))
+            if param == "cloud_area_fraction":
+                nora3_da_spinup = nora3_da_spinup.isel(height3=[0])
 
             # load data - this will not work particularly well for long time series...
             # XXX: should figure out a better solution
@@ -544,8 +557,9 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
 
             # leap year problem with open_mfdataset
             # XXX: extremely hacky workaround
-            if(nora3_da.values[0] < 0):
-                nora3_da.values[0] = 0.0
+            for index, value in enumerate(nora3_da[0]):
+                if(value[0] < 0):
+                    nora3_da[index].values[0] = 0.0
 
     return nora3_da
 
@@ -579,18 +593,18 @@ def write_SUNPOINT_timeseries(stations, output_file, param, start_time, end_time
 
         dataarrays = []
 
-        for (station_id, station_lon, station_lat) in zip(station_ids, station_lons, station_lats):
-            print("Writing timeseries for station " + str(station_id) + " at " 
-                    + str(station_lon) + ", " + str(station_lat))
+        #for (station_id, station_lon, station_lat) in zip(station_ids, station_lons, station_lats):
+        #    print("Writing timeseries for station " + str(station_id) + " at " 
+        #            + str(station_lon) + ", " + str(station_lat))
 
-            da = get_nora3_timeseries(param, station_lon, station_lat, 
+        da = get_nora3_timeseries(param, station_lons, station_lats, 
                     stride_start_time, stride_end_time)
             
-            dataarrays.append(da)
+        #dataarrays.append(da)
 
-        combined = xr.concat(dataarrays, dim="station")
+        #combined = xr.concat(dataarrays, dim="station")
         out_da = xr.Dataset()
-        out_da[param] = combined
+        out_da[param] = da #combined
         
         out_da = out_da.chunk(chunks={"station": 1})
 
@@ -615,7 +629,7 @@ def write_SUNPOINT_timeseries(stations, output_file, param, start_time, end_time
 
             append_to_netcdf(output_file, out_da, unlimited_dims="time")
 
-        del combined
+        #del combined
         del out_da
         gc.collect()
 
@@ -771,11 +785,11 @@ if __name__ == "__main__":
     #write_MO_timeseries(input_stations, output_file, param, start_time, end_time)
 
     # hardcoded example - extracting param from start_time to end_time for all stations contained in the input_stations dict
-    input_stations = {
-        "stationid": ["Oslo-Blindern"],
-        "longitude": [10.72],
-        "latitude": [59.9423]
-    }
+    #input_stations = {
+    #    "stationid": ["Oslo-Blindern"],
+    #    "longitude": [10.72],
+    #    "latitude": [59.9423]
+    #}
     # stasjoner med skyobservasjoner
     #input_stations = {
     #    "stationid": ["Oslo-Blindern", "Rygge", "Bergen-Florida", "Flesland", "Dovre-Lannem", "Tromsø-Holt", "Karasjok"],
@@ -802,6 +816,6 @@ if __name__ == "__main__":
     #    "latitude": [59.6604995727539, 60.5932, 61.6775016784668, 63.4152984619141, 69.3003005981445]
     #}
     
-    #input_stations = read_stations(args.input_stations)
+    input_stations = read_stations(args.input_stations)
     write_SUNPOINT_timeseries(input_stations, args.output_file, args.parameter, start_time, end_time)
 # %%
