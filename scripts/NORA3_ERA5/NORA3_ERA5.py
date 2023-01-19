@@ -152,6 +152,60 @@ def get_timeseries(param, lon, lat, start_time, end_time, use_atm=True):
     else:
         return ("ERA5", get_era5_timeseries(param, lat, lon, start_time, end_time, use_atm))
 
+
+def retrieve_era5_data(filename, param):
+    """Retrieves param from cdsapi for the SUNPOINT 5-year period 2016 to 2020, and saves to filename."""
+
+    import cdsapi
+
+    c = cdsapi.Client()
+
+    c.retrieve(
+        'reanalysis-era5-single-levels',
+        {
+            'product_type': 'reanalysis',
+            'format': 'netcdf',
+            'variable': param,
+            'month': [
+                '01', '02', '03',
+                '04', '05', '06',
+                '07', '08', '09',
+                '10', '11', '12',
+            ],
+            'day': [
+                '01', '02', '03',
+                '04', '05', '06',
+                '07', '08', '09',
+                '10', '11', '12',
+                '13', '14', '15',
+                '16', '17', '18',
+                '19', '20', '21',
+                '22', '23', '24',
+                '25', '26', '27',
+                '28', '29', '30',
+                '31',
+            ],
+            'time': [
+                '00:00', '01:00', '02:00',
+                '03:00', '04:00', '05:00',
+                '06:00', '07:00', '08:00',
+                '09:00', '10:00', '11:00',
+                '12:00', '13:00', '14:00',
+                '15:00', '16:00', '17:00',
+                '18:00', '19:00', '20:00',
+                '21:00', '22:00', '23:00',
+            ],
+            'year': [
+                '2016', '2017', '2018',
+                '2019', '2020',
+            ],
+            'area': [
+                81, 4, 57,
+                34,
+            ],
+        },
+        filename + '.nc')
+
 def get_era5_timeseries(param, lon, lat, start_time, end_time, use_atm=True):
     """Time series extraction from ERA5.
 
@@ -258,6 +312,89 @@ nora3_data_variables = ["air_temperature_0m",
     "snowfall_amount_acc"
 ]
 
+def _get_nora3_timeseries_sfx(param, lon, lat, start_time, end_time):
+    data_dir = "/lustre/storeB/project/fou/om/WINDSURFER/HM40h12/netcdf"
+
+    # find and open correct netCDF file(s)
+    filenames = []
+
+    # due to 3h time res
+    augmented_start_time = start_time - timedelta(hours=(start_time.hour % 3)) 
+    augmented_end_time = end_time + timedelta(hours=(end_time.hour % 3))
+
+    current_time = augmented_start_time
+
+    while current_time <= augmented_end_time:
+        # find correct period folder
+        if current_time.hour < 6:
+            period = 0
+        elif current_time.hour < 12:
+            period = 6
+        elif current_time.hour < 18:
+            period = 12
+        else:
+            period = 18
+        
+        # find correct index file
+        index_file = current_time.hour - period
+        if index_file < 0:
+            index_file += 24
+
+        filenames.append(
+            os.path.join(data_dir, "{year}/{month}/{day}/{period:02d}/fc{year}{month}{day}{period:02d}_00{index_file}_full_sfx.nc" \
+            .format(year=current_time.strftime("%Y"), 
+                    month=current_time.strftime("%m"), 
+                    day=current_time.strftime("%d"), 
+                    period=period, index_file=index_file)))
+        
+        current_time += timedelta(hours=3)
+
+    #print(filenames)
+
+    # NOTE: Issues with /lustre/storeB/project/fou/om/WINDSURFER/HM40h12/netcdf/2017/01/26/*, so we skip this day
+    # (The interpolation will make sure the output is on the expected form.)
+    filenames = [x for x in filenames if not x.startswith("/lustre/storeB/project/fou/om/WINDSURFER/HM40h12/netcdf/2017/01/26/")]
+
+    nora3 = xr.open_mfdataset(filenames, concat_dim="time", combine="nested",
+                data_vars='minimal', coords='minimal', compat='override')
+    
+    # find coordinates in data set projection by lookup in lon-lat variables
+    y_idx = []
+    x_idx = []
+    for (lon_elem, lat_elem) in zip(lon, lat):
+        abslat = np.abs(nora3.latitude-lat_elem)
+        abslon = np.abs(nora3.longitude-lon_elem)
+        cor = np.maximum(abslon, abslat)
+        y_idx.append(np.where(cor == np.min(cor))[0][0])
+        x_idx.append(np.where(cor == np.min(cor))[1][0])
+        #([y_idx], [x_idx]) = np.where(cor == np.min(cor))
+
+    #print(x_idx)
+    #print(y_idx)
+    #print("Projected lon, lat: " 
+    #        + str(nora3["longitude"].isel(x=x_idx, y=y_idx).values) + ", " 
+    #        + str(nora3["latitude"].isel(x=x_idx, y=y_idx).values))
+
+    # extract data set
+    #nora3_da = nora3[param].sel(x=x, y=y, method="nearest")
+    #nora3[param] = nora3[param].expand_dims({"station": len(lon)})
+    nora3_da = nora3[param].isel(x=xr.DataArray(x_idx, dims="station"), y=xr.DataArray(y_idx, dims="station"))
+    nora3_da = nora3_da.sel(time=slice(augmented_start_time, augmented_end_time))
+
+    del nora3_da["x"]
+    del nora3_da["y"]
+    del nora3_da.attrs["grid_mapping"]
+
+    # interpolate to 1h time res and slice to requested time interval
+    nora3_da_interp = nora3_da.resample(time="1H").interpolate()
+    nora3_da_interp = nora3_da_interp.sel(time=slice(start_time, end_time))
+
+    # xr adds too many coordinates (might be able to fix this in a better way)
+    nora3_da_interp.attrs["coordinates"] = "longitude latitude"
+    
+    return nora3_da_interp
+
+
 #@profile
 def get_nora3_timeseries(param, lon, lat, start_time, end_time):
     """Time series extraction from NORA3.
@@ -282,18 +419,20 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
         "convective_cloud_area_fraction",
         "high_type_cloud_area_fraction",
         "medium_type_cloud_area_fraction",
-        "low_type_cloud_area_fraction"]
+        "low_type_cloud_area_fraction",
+        "lwe_thickness_of_atmosphere_mass_content_of_water_vapor"]
     integrated_params = ["integral_of_toa_net_downward_shortwave_flux_wrt_time", 
         "integral_of_surface_net_downward_shortwave_flux_wrt_time",
         "integral_of_surface_downwelling_shortwave_flux_in_air_wrt_time",
         "snowfall_amount_acc", 
         "precipitation_amount_acc"]
+    sfx_params = ["ASN_VEG", "TALB_ISBA", "LAI", "VEG"] # 3h time resolution
 
     lon = lon if isinstance(lon, list) else [lon]
     lat = lat if isinstance(lat, list) else [lat]
 
     # sanity check arguments
-    if param not in available_atm_params:
+    if param not in available_atm_params and param not in sfx_params:
         raise RuntimeError("Undefined parameter: " + param)
     if any(x < 44.0 for x in lat) and any(x > 83.0 for x in lat):
         raise RuntimeError("Latitude (lat) must be in the interval [44.0, 83.0]")
@@ -302,6 +441,9 @@ def get_nora3_timeseries(param, lon, lat, start_time, end_time):
     
     #print("From " + start_time.strftime("%Y%m%d-%H"))
     #print("To " + end_time.strftime("%Y%m%d-%H"))
+
+    if param in sfx_params:
+        return _get_nora3_timeseries_sfx(param, lon, lat, start_time, end_time)
 
     # find and open correct netCDF file(s)
     first_timestep_filename = ""
